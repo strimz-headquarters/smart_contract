@@ -4,6 +4,7 @@ use core::array::Array;
 #[starknet::interface]
 pub trait IStrimz<TContractState> {
     fn deposit(ref self: TContractState, amount: u256);
+    fn withdraw(ref self: TContractState, amount: u256);
     fn get_balance(self: @TContractState, user_address: ContractAddress) -> u256;
     fn subscribe_to_plan(ref self: TContractState, plan: u32) -> bool;
     fn unsubscribe_from_plan(ref self: TContractState, plan: u32) -> bool;
@@ -12,12 +13,14 @@ pub trait IStrimz<TContractState> {
         recipient: ContractAddress,
         amount: u256,
         interval: Strimz::Interval,
+        start_time: u64,
     ) -> u32;
     fn create_multiple_streams(
         ref self: TContractState,
         recipients: Array<ContractAddress>,
         amounts: Array<u256>,
         interval: Strimz::Interval,
+        start_time: u64,
     ) -> Array<u32>;
     //when streaming one payment
     fn stream_one(
@@ -38,6 +41,7 @@ pub trait IStrimz<TContractState> {
         address: ContractAddress,
         amount: u32,
         interval: Strimz::Interval,
+        start_time: u64,
     ) -> bool;
 
     fn get_user_streams(self: @TContractState, user: ContractAddress) -> Array<u32>;
@@ -71,7 +75,7 @@ pub mod Strimz {
         next_stream_id: u32,
         user_stream_count: Map<ContractAddress, u32>, // Track number of streams per user
         user_stream_at_index: Map<(ContractAddress, u32), u32>, // Maps (user, index) -> stream_id
-        user_utilities: Map<(ContractAddress, u32), bool>,  // Maps (user, utility) -> is_active
+        user_utilities: Map<(ContractAddress, u32), bool>, // Maps (user, utility) -> is_active
         utility_stream_id: Map<(ContractAddress, u32), u32> // Maps (user, utility) -> stream_id
     }
 
@@ -100,6 +104,7 @@ pub mod Strimz {
         amount: u256,
         interval: Interval,
         active: bool,
+        start_time: u64,
     }
 
     #[event]
@@ -111,6 +116,7 @@ pub mod Strimz {
         StreamCreated: StreamCreated,
         StreamEdited: StreamEdited,
         StreamDeleted: StreamDeleted,
+        WithdrawSuccessful: WithdrawSuccessful,
     }
 
     #[derive(Drop, starknet::Event)]
@@ -141,6 +147,7 @@ pub mod Strimz {
         sender: ContractAddress,
         recipient: ContractAddress,
         amount: u256,
+        start_time: u64,
     }
 
     #[derive(Drop, starknet::Event)]
@@ -154,6 +161,14 @@ pub mod Strimz {
     struct StreamDeleted {
         #[key]
         stream_id: u32,
+    }
+
+    #[derive(Drop, starknet::Event)]
+    pub struct WithdrawSuccessful {
+        #[key]
+        pub user_address: ContractAddress,
+        pub amount: u256,
+        pub remaining_balance: u256,
     }
 
     #[derive(Copy, Drop, Clone, Serde, PartialEq)]
@@ -192,6 +207,31 @@ pub mod Strimz {
                     },
                 )
         }
+
+        fn withdraw(ref self: ContractState, amount: u256) {
+            let user = get_caller_address();
+            
+            // Check user balance
+            let user_balance = self.user_balance.read(user);
+            assert(user_balance >= amount, 'insufficient balance');
+            
+            // Update user balance
+            let new_balance = user_balance - amount;
+            self.user_balance.write(user, new_balance);
+            
+            // Transfer tokens to user
+            self._transfer(user, amount);
+        
+            // Emit withdrawal event
+            self.emit(
+                WithdrawSuccessful { 
+                    user_address: user, 
+                    amount, 
+                    remaining_balance: new_balance 
+                }
+            );
+        }
+        
         fn get_balance(self: @ContractState, user_address: ContractAddress) -> u256 {
             let user_balance = self.user_balance.read(user_address);
             user_balance
@@ -228,7 +268,11 @@ pub mod Strimz {
         }
 
         fn create_single_stream(
-            ref self: ContractState, recipient: ContractAddress, amount: u256, interval: Interval,
+            ref self: ContractState,
+            recipient: ContractAddress,
+            amount: u256,
+            interval: Interval,
+            start_time: u64,
         ) -> u32 {
             let user_address = get_caller_address();
             // let user_balance: u256 = self.user_balance.read(user_address);
@@ -243,6 +287,7 @@ pub mod Strimz {
                 amount: amount,
                 interval: interval,
                 active: true,
+                start_time: start_time,
             };
 
             self.streams.write(stream_id, stream);
@@ -256,7 +301,12 @@ pub mod Strimz {
             self.next_stream_id.write(stream_id + 1);
 
             // Emit event
-            self.emit(StreamCreated { stream_id, sender: user_address, recipient, amount });
+            self
+                .emit(
+                    StreamCreated {
+                        stream_id, sender: user_address, recipient, amount, start_time,
+                    },
+                );
 
             stream_id
         }
@@ -266,16 +316,17 @@ pub mod Strimz {
             recipients: Array<ContractAddress>,
             amounts: Array<u256>,
             interval: Interval,
+            start_time: u64,
         ) -> Array<u32> {
             // Validate arrays have same length
             assert(recipients.len() == amounts.len(), 'arrays length mismatch');
-            
+
             let user_address = get_caller_address();
             let mut total_amount: u256 = 0;
-            
+
             // Track created stream IDs
             let mut created_stream_ids = ArrayTrait::new();
-            
+
             // Calculate total amount for all streams
             let mut i: u32 = 0;
             loop {
@@ -285,15 +336,15 @@ pub mod Strimz {
                 total_amount += *amounts[i];
                 i += 1;
             };
-            
+
             // Create streams for each recipient
             let mut j: u32 = 0;
-            
+
             loop {
                 if j >= recipients.len() {
                     break;
                 }
-                
+
                 // Create individual stream
                 let stream_id = self.next_stream_id.read();
                 let stream = Stream {
@@ -303,33 +354,36 @@ pub mod Strimz {
                     amount: *amounts[j],
                     interval: interval,
                     active: true,
+                    start_time: start_time,
                 };
-                
+
                 self.streams.write(stream_id, stream);
-                
+
                 // Track stream for user
                 let current_count = self.user_stream_count.read(user_address);
                 self.user_stream_at_index.write((user_address, current_count), stream_id);
                 self.user_stream_count.write(user_address, current_count + 1);
-                
+
                 // Add stream ID to return array
                 created_stream_ids.append(stream_id);
-                
+
                 // Emit event for this stream
-                self.emit(
-                    StreamCreated { 
-                        stream_id, 
-                        sender: user_address, 
-                        recipient: *recipients[j], 
-                        amount: *amounts[j] 
-                    }
-                );
-                
+                self
+                    .emit(
+                        StreamCreated {
+                            stream_id,
+                            sender: user_address,
+                            recipient: *recipients[j],
+                            amount: *amounts[j],
+                            start_time: start_time,
+                        },
+                    );
+
                 // Increment stream id
                 self.next_stream_id.write(stream_id + 1);
                 j += 1;
             };
-            
+
             // Return array of all created stream IDs
             created_stream_ids
         }
@@ -437,31 +491,28 @@ pub mod Strimz {
             address: ContractAddress,
             amount: u32,
             interval: Interval,
+            start_time: u64,
         ) -> bool {
             let user = get_caller_address();
-            
+
             // Check if utility payment already exists
             let has_utility = self.user_utilities.read((user, utility));
             assert(!has_utility, 'Utility payment exists');
-            
+
             // Create a stream for utility payment
-            let stream_id = self.create_single_stream(
-                address,
-                amount.into(),
-                interval,
-            );
-            
+            let stream_id = self.create_single_stream(address, amount.into(), interval, start_time);
+
             // Map utility to user and store stream ID
             self.user_utilities.write((user, utility), true);
             self.utility_stream_id.write((user, utility), stream_id);
-            
+
             true
         }
 
         fn get_user_utilities(self: @ContractState, user: ContractAddress) -> Array<u32> {
             let mut utilities = ArrayTrait::new();
             let mut i: u32 = 0;
-            
+
             // Iterate through possible utilities
             // Assuming utilities are numbered 0-3 based on your enum
             loop {
@@ -473,35 +524,35 @@ pub mod Strimz {
                 }
                 i += 1;
             };
-            
+
             utilities
         }
-        
+
         fn has_utility(self: @ContractState, user: ContractAddress, utility: u32) -> bool {
             self.user_utilities.read((user, utility))
         }
-        
+
         fn cancel_utility(ref self: ContractState, utility: u32) -> bool {
             let user = get_caller_address();
-            
+
             // Check if utility payment exists
             let has_utility = self.user_utilities.read((user, utility));
             assert(has_utility, 'No utility payment found');
-            
+
             // Get the associated stream ID
             let stream_id = self.utility_stream_id.read((user, utility));
-            
+
             // Cancel the stream
             self.delete_stream(stream_id);
-            
+
             // Remove utility mapping
             self.user_utilities.write((user, utility), false);
-            
+
             true
         }
     }
 
-  
+
     #[generate_trait]
     impl ERC20Impl of ERC20Trait {
         fn _transfer_from(
