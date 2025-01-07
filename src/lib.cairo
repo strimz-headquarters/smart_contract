@@ -161,7 +161,8 @@ pub mod Strimz {
         gas,
         Electricity,
         Water,
-        wifi,
+        data,
+        airtime,
     }
 
 
