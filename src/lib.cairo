@@ -228,7 +228,6 @@ pub mod Strimz {
         airtime,
     }
 
-
     #[constructor]
     fn constructor(ref self: ContractState) {      
         self.supported_tokens_count.write(0);
@@ -735,3 +734,7 @@ pub mod Strimz {
         }
     }
 }
+
+
+//contract address- 0x006e1eef173499c6b794e64fcb5e3cae1ad7016c005cbbb207de54ab98f7a9f9
+//class hash- 0x060db5b391035af710f981bcfee9f71f9318fdd9ba558b750ec5fbcfc9bb4686
