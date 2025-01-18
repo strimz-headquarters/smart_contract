@@ -2,24 +2,39 @@ use starknet::ContractAddress;
 use core::array::Array;
 
 #[starknet::interface]
-pub trait IStrimz<TContractState> {  
+pub trait IStrimz<TContractState> {
     fn add_supported_token(ref self: TContractState, token_address: ContractAddress) -> bool;
+    fn add_supported_token_with_pair(
+        ref self: TContractState, 
+        token_address: ContractAddress, 
+        pair_key: felt252
+    ) -> bool;
+    fn get_all_balances_usd_value(
+        self: @TContractState,
+        user: ContractAddress
+    ) -> u256;
+    fn get_token_balance_usd_value(
+        self: @TContractState, 
+        user: ContractAddress, 
+        token: ContractAddress
+    ) -> u256;
+    fn get_token_usd_value(
+        self: @TContractState, 
+        token_address: ContractAddress
+    ) -> u256;
     fn remove_supported_token(ref self: TContractState, token_address: ContractAddress) -> bool;
     fn is_token_supported(self: @TContractState, token_address: ContractAddress) -> bool;
     fn get_supported_tokens(self: @TContractState) -> Array<ContractAddress>;
     fn get_user_token_balance(
-        self: @TContractState, user: ContractAddress, token: ContractAddress
+        self: @TContractState, user: ContractAddress, token: ContractAddress,
     ) -> u256;
     fn get_user_all_balances(
-        self: @TContractState, user: ContractAddress
+        self: @TContractState, user: ContractAddress,
     ) -> (Array<ContractAddress>, Array<u256>);
-    fn deposit_token(
-        ref self: TContractState, token_address: ContractAddress, amount: u256
-    );
+    fn deposit_token(ref self: TContractState, token_address: ContractAddress, amount: u256);
     fn withdraw_token(
-        ref self: TContractState, token_address: ContractAddress, amount: u256
+        ref self: TContractState, token_address: ContractAddress, amount: u256,
     ) -> u256;
-    // fn get_balance(self: @TContractState, user_address: ContractAddress) -> u256;
     fn subscribe_to_plan(ref self: TContractState, plan: u32) -> bool;
     fn unsubscribe_from_plan(ref self: TContractState, plan: u32) -> bool;
     fn create_single_stream(
@@ -38,18 +53,18 @@ pub trait IStrimz<TContractState> {
         start_time: u64,
         token: ContractAddress,
     ) -> Array<u32>;
-    //when streaming one payment
     fn stream_one(
         ref self: TContractState,
         address: ContractAddress,
         token: ContractAddress,
         recipient: ContractAddress,
         amount: u256,
-        
     );
-    //when streaming multiple payments
     fn stream_multiple(
-        ref self: TContractState, token: ContractAddress, recipients: Array<ContractAddress>, amounts: Array<u256>,
+        ref self: TContractState,
+        token: ContractAddress,
+        recipients: Array<ContractAddress>,
+        amounts: Array<u256>,
     );
     fn edit_stream(ref self: TContractState, stream_id: u32, amount: u256) -> bool;
     fn delete_stream(ref self: TContractState, stream_id: u32) -> bool;
@@ -62,14 +77,11 @@ pub trait IStrimz<TContractState> {
         start_time: u64,
         token: ContractAddress,
     ) -> bool;
-
     fn get_user_streams(self: @TContractState, user: ContractAddress) -> Array<u32>;
     fn get_user_utilities(self: @TContractState, user: ContractAddress) -> Array<u32>;
     fn has_utility(self: @TContractState, user: ContractAddress, utility: u32) -> bool;
     fn cancel_utility(ref self: TContractState, utility: u32) -> bool;
-
 }
-
 
 #[starknet::contract]
 pub mod Strimz {
@@ -82,12 +94,26 @@ pub mod Strimz {
         StorageMapReadAccess, StorageMapWriteAccess, StoragePointerWriteAccess,
         StoragePointerReadAccess,
     };
-    
+    use pragma_lib::abi::{IPragmaABIDispatcher, IPragmaABIDispatcherTrait};
+    use pragma_lib::types::{AggregationMode, DataType, PragmaPricesResponse};
 
+    const DECIMALS_MULTIPLIER: u256 = 1_000_000_000_000_000_000; // 18 decimals
+    const PRAGMA_ORACLE_ADDRESS: felt252 = 0x36031daa264c24520b11d93af622c848b2499b66b41d611bac95e13cfca131a;
+
+    // Plan constants
+    const PLAN_BASIC: u32 = 0;
+    const PLAN_PREMIUM: u32 = 1;
+    const PLAN_PREMIUM_PLUS: u32 = 2;
+
+    // Plan prices in USD (multiplied by DECIMALS_MULTIPLIER)
+    const BASIC_PRICE: u256 = 0; // Free
+    const PREMIUM_PRICE: u256 = 50_000_000_000_000_000_000; // $50
+    const PREMIUM_PLUS_PRICE: u256 = 100_000_000_000_000_000_000; // $100
 
     #[storage]
     struct Storage {
-        
+        oracle_address: ContractAddress,
+        token_pairs: Map<ContractAddress, felt252>,
         user_balance: Map<ContractAddress, u256>,
         user_plan: Map<ContractAddress, u32>,
         plan_prices: Map<u32, u256>,
@@ -95,27 +121,15 @@ pub mod Strimz {
         streams: Map<u32, Stream>,
         user_streams: Map<ContractAddress, u32>,
         next_stream_id: u32,
-        user_stream_count: Map<ContractAddress, u32>, // Track number of streams per user
-        user_stream_at_index: Map<(ContractAddress, u32), u32>, // Maps (user, index) -> stream_id
-        user_utilities: Map<(ContractAddress, u32), bool>, // Maps (user, utility) -> is_active
-        utility_stream_id: Map<(ContractAddress, u32), u32>, // Maps (user, utility) -> stream_id
+        user_stream_count: Map<ContractAddress, u32>,
+        user_stream_at_index: Map<(ContractAddress, u32), u32>,
+        user_utilities: Map<(ContractAddress, u32), bool>,
+        utility_stream_id: Map<(ContractAddress, u32), u32>,
         supported_tokens: Map<ContractAddress, bool>,
         supported_tokens_list: Map<u32, ContractAddress>,
         supported_tokens_count: u32,
-        user_token_balances: Map<(ContractAddress, ContractAddress), u256>, // (user, token) -> balance
-          
-       
-    } 
-   
-
-
-    const PLAN_BRONZE: u32 = 0;
-    const PLAN_SILVER: u32 = 1;
-    const PLAN_GOLD: u32 = 2;
-
-    const BRONZE_PRICE: u256 = 100000000000000000; // 0.1 STRK
-    const SILVER_PRICE: u256 = 200000000000000000; // 0.2 STRK
-    const GOLD_PRICE: u256 = 300000000000000000; // 0.3 STRK
+        user_token_balances: Map<(ContractAddress, ContractAddress), u256>,
+    }
 
     #[derive(Copy, Drop, Clone, Serde, starknet::Store)]
     #[allow(starknet::store_no_default_variant)]
@@ -125,6 +139,7 @@ pub mod Strimz {
         BiWeekly,
         Monthly,
     }
+
     #[derive(Copy, Drop, Serde, starknet::Store)]
     pub struct Stream {
         id: u32,
@@ -149,8 +164,11 @@ pub mod Strimz {
         WithdrawSuccessful: WithdrawSuccessful,
         TokenAdded: TokenAdded,
         TokenRemoved: TokenRemoved,
+        TokenPairKeySet: TokenPairKeySet,
+        PriceFeedError: PriceFeedError,
     }
 
+    // Event structs
     #[derive(Drop, starknet::Event)]
     pub struct DepositSuccessiful {
         #[key]
@@ -158,8 +176,8 @@ pub mod Strimz {
         pub amount: u256,
         pub token: ContractAddress,
         pub new_balance: u256,
-        
     }
+
     #[derive(Drop, starknet::Event)]
     pub struct PlanActivated {
         #[key]
@@ -210,110 +228,198 @@ pub mod Strimz {
     #[derive(Drop, starknet::Event)]
     pub struct TokenAdded {
         #[key]
-        token_address: ContractAddress
+        token_address: ContractAddress,
     }
 
     #[derive(Drop, starknet::Event)]
     pub struct TokenRemoved {
         #[key]
-        token_address: ContractAddress
+        token_address: ContractAddress,
     }
 
-    #[derive(Copy, Drop, Clone, Serde, PartialEq)]
-    enum Utility {
-        gas,
-        Electricity,
-        Water,
-        data,
-        airtime,
+    #[derive(Drop, starknet::Event)]
+    pub struct TokenPairKeySet {
+        #[key]
+        token_address: ContractAddress,
+        pair_key: felt252,
+    }
+
+    #[derive(Drop, starknet::Event)]
+    pub struct PriceFeedError {
+        #[key]
+        token_address: ContractAddress,
+        error_message: felt252,
     }
 
     #[constructor]
-    fn constructor(ref self: ContractState) {      
+    fn constructor(ref self: ContractState) {
         self.supported_tokens_count.write(0);
+        self.oracle_address.write(contract_address_const::<PRAGMA_ORACLE_ADDRESS>());
 
-        let strk = contract_address_const::<0x04718f5a0fc34cc1af16a1cdee98ffb20c31f5cd61d6ab07201858f4287c938d>();
+        // Initialize with default token (STRK)
+        let strk = contract_address_const::<
+            0x04718f5a0fc34cc1af16a1cdee98ffb20c31f5cd61d6ab07201858f4287c938d
+        >();
         self._add_token(strk);
-        // Initialize plan prices
-        self.plan_prices.write(PLAN_BRONZE, BRONZE_PRICE);
-        self.plan_prices.write(PLAN_SILVER, SILVER_PRICE);
-        self.plan_prices.write(PLAN_GOLD, GOLD_PRICE);
-    }
 
+        // Initialize plan prices
+        self.plan_prices.write(PLAN_BASIC, BASIC_PRICE);
+        self.plan_prices.write(PLAN_PREMIUM, PREMIUM_PRICE);
+        self.plan_prices.write(PLAN_PREMIUM_PLUS, PREMIUM_PLUS_PRICE);
+    }
 
     #[abi(embed_v0)]
     impl StrimzImpl of super::IStrimz<ContractState> {
-        fn deposit_token(
-            ref self: ContractState, token_address: ContractAddress, amount: u256
-        ) {
+        fn deposit_token(ref self: ContractState, token_address: ContractAddress, amount: u256) {
             self._assert_token_supported(token_address);
-            
+
             let user = get_caller_address();
             let contract_address = get_contract_address();
-            
+
             // Transfer tokens from user to contract
             self._transfer_from(token_address, user, contract_address, amount);
-            
+
             // Update user's token balance
             let current_balance = self.user_token_balances.read((user, token_address));
             let new_balance = current_balance + amount;
             self.user_token_balances.write((user, token_address), new_balance);
-            
-            self.emit(DepositSuccessiful{ user_address: user, token: token_address, amount, new_balance });
+
+            self
+                .emit(
+                    DepositSuccessiful {
+                        user_address: user, token: token_address, amount, new_balance,
+                    },
+                );
         }
 
 
         fn withdraw_token(
-            ref self: ContractState, token_address: ContractAddress, amount: u256
+            ref self: ContractState, token_address: ContractAddress, amount: u256,
         ) -> u256 {
             self._assert_token_supported(token_address);
-            
+
             let user = get_caller_address();
             let balance = self.user_token_balances.read((user, token_address));
             assert(balance >= amount, 'Insufficient balance');
-            
+
             // Update balance before transfer
-            self.user_token_balances.write(
-                (user, token_address), balance - amount
-            );
-            
+            self.user_token_balances.write((user, token_address), balance - amount);
+
             // Transfer tokens to user
             self._transfer(token_address, user, amount);
-            let remaining_balance =self.user_token_balances.read((user, token_address));
-            
-            self.emit(WithdrawSuccessful { user_address: user, amount, remaining_balance, token: token_address});
+            let remaining_balance = self.user_token_balances.read((user, token_address));
+
+            self
+                .emit(
+                    WithdrawSuccessful {
+                        user_address: user, amount, remaining_balance, token: token_address,
+                    },
+                );
 
             remaining_balance
-            
         }
 
-        fn add_supported_token(
-            ref self: ContractState, token_address: ContractAddress
-        ) -> bool {          
+        fn add_supported_token(ref self: ContractState, token_address: ContractAddress) -> bool {
             assert(!self.supported_tokens.read(token_address), 'Token already supported');
             self._add_token(token_address);
             true
         }
 
-        fn remove_supported_token(
-            ref self: ContractState, token_address: ContractAddress
-        ) -> bool {          
+        fn get_token_usd_value(
+            self: @ContractState, 
+            token_address: ContractAddress
+        ) -> u256 {
+            self._assert_token_supported(token_address);
+            self._get_token_usd_price(token_address)
+        }
+    
+        fn get_token_balance_usd_value(
+            self: @ContractState, 
+            user: ContractAddress, 
+            token: ContractAddress
+        ) -> u256 {
+            self._assert_token_supported(token);
+            let balance = self.user_token_balances.read((user, token));
+            let price = self._get_token_usd_price(token);
+            
+            balance * price / DECIMALS_MULTIPLIER
+        }
+    
+        fn get_all_balances_usd_value(
+            self: @ContractState,
+            user: ContractAddress
+        ) -> u256 {
+            let mut total_usd_value: u256 = 0;
+            let count = self.supported_tokens_count.read();
+            let mut i: u32 = 0;
+            
+            loop {
+                if i >= count {
+                    break;
+                }
+                
+                let token = self.supported_tokens_list.read(i);
+                if self.supported_tokens.read(token) {
+                    let balance = self.user_token_balances.read((user, token));
+                    let price = self._get_token_usd_price(token);
+                    total_usd_value += balance * price / DECIMALS_MULTIPLIER;
+                }
+                i += 1;
+            };
+            
+            total_usd_value
+        }
+        
+ //pragma implementation
+        fn add_supported_token_with_pair(
+            ref self: ContractState, 
+            token_address: ContractAddress, 
+            pair_key: felt252
+        ) -> bool {
+            assert(!self.supported_tokens.read(token_address), 'Token already supported');
+            
+            // Verify the price feed works
+            let oracle_dispatcher = IPragmaABIDispatcher { 
+                contract_address: self.oracle_address.read() 
+            };
+            
+            // Try to get price data to verify the pair key works
+            let _output = oracle_dispatcher.get_data(
+                DataType::SpotEntry(pair_key),
+                AggregationMode::Median(())
+            );
+            
+            // Add token to supported tokens
+            let count = self.supported_tokens_count.read();
+            self.supported_tokens.write(token_address, true);
+            self.supported_tokens_list.write(count, token_address);
+            self.supported_tokens_count.write(count + 1);
+            
+            // Store the pair key
+            self.token_pairs.write(token_address, pair_key);
+            
+            // Emit events
+            self.emit(TokenAdded { token_address });
+            // self.emit(TokenPairSet { token_address, pair_key });
+            
+            true
+        }
+
+        fn remove_supported_token(ref self: ContractState, token_address: ContractAddress) -> bool {
             assert(self.supported_tokens.read(token_address), 'Token not supported');
             self.supported_tokens.write(token_address, false);
             self.emit(TokenRemoved { token_address });
             true
         }
 
-        fn is_token_supported(
-            self: @ContractState, token_address: ContractAddress
-        ) -> bool {
+        fn is_token_supported(self: @ContractState, token_address: ContractAddress) -> bool {
             self.supported_tokens.read(token_address)
         }
 
         fn get_supported_tokens(self: @ContractState) -> Array<ContractAddress> {
             let mut tokens = ArrayTrait::new();
             let count = self.supported_tokens_count.read();
-            
+
             let mut i: u32 = 0;
             loop {
                 if i >= count {
@@ -325,25 +431,25 @@ pub mod Strimz {
                 }
                 i += 1;
             };
-            
+
             tokens
         }
 
         fn get_user_token_balance(
-            self: @ContractState, user: ContractAddress, token: ContractAddress
+            self: @ContractState, user: ContractAddress, token: ContractAddress,
         ) -> u256 {
             self.user_token_balances.read((user, token))
         }
 
         fn get_user_all_balances(
-            self: @ContractState, user: ContractAddress
+            self: @ContractState, user: ContractAddress,
         ) -> (Array<ContractAddress>, Array<u256>) {
             let mut tokens = ArrayTrait::new();
             let mut balances = ArrayTrait::new();
-            
+
             let count = self.supported_tokens_count.read();
             let mut i: u32 = 0;
-            
+
             loop {
                 if i >= count {
                     break;
@@ -356,11 +462,10 @@ pub mod Strimz {
                 }
                 i += 1;
             };
-            
+
             (tokens, balances)
         }
-        
-      
+
 
         fn subscribe_to_plan(ref self: ContractState, plan: u32) -> bool {
             let user_address = get_caller_address();
@@ -398,7 +503,7 @@ pub mod Strimz {
             amount: u256,
             interval: Interval,
             start_time: u64,
-            token: ContractAddress
+            token: ContractAddress,
         ) -> u32 {
             let user_address = get_caller_address();
             // let user_balance: u256 = self.user_balance.read(user_address);
@@ -431,7 +536,7 @@ pub mod Strimz {
             self
                 .emit(
                     StreamCreated {
-                        stream_id, sender: user_address, recipient, amount, start_time, token
+                        stream_id, sender: user_address, recipient, amount, start_time, token,
                     },
                 );
 
@@ -532,7 +637,10 @@ pub mod Strimz {
         }
 
         fn stream_multiple(
-            ref self: ContractState, token: ContractAddress, recipients: Array<ContractAddress>, amounts: Array<u256>,
+            ref self: ContractState,
+            token: ContractAddress,
+            recipients: Array<ContractAddress>,
+            amounts: Array<u256>,
         ) {
             // Validate arrays have same length
             assert(recipients.len() == amounts.len(), 'arrays length mismatch');
@@ -624,7 +732,6 @@ pub mod Strimz {
             interval: Interval,
             start_time: u64,
             token: ContractAddress,
-            
         ) -> bool {
             let user = get_caller_address();
 
@@ -683,6 +790,8 @@ pub mod Strimz {
 
             true
         }
+
+
     }
 
 
@@ -696,10 +805,9 @@ pub mod Strimz {
             amount: u256,
         ) {
             let token_dispatcher = IERC20Dispatcher { contract_address: token };
-            
             assert(token_dispatcher.balance_of(sender) >= amount, 'insufficient funds');
-            let contract_address = get_contract_address();
             
+            let contract_address = get_contract_address();
             assert(
                 token_dispatcher.allowance(sender, contract_address) >= amount,
                 'insufficient allowance',
@@ -710,11 +818,69 @@ pub mod Strimz {
         }
 
         fn _transfer(
-            ref self: ContractState, token: ContractAddress, recipient: ContractAddress, amount: u256
+            ref self: ContractState,
+            token: ContractAddress,
+            recipient: ContractAddress,
+            amount: u256,
         ) {
             let token_dispatcher = IERC20Dispatcher { contract_address: token };
             let success = token_dispatcher.transfer(recipient, amount);
             assert(success, 'ERC20 transfer failed!');
+        }
+    }
+
+    #[generate_trait]
+    impl PragmaHelperFunctions of PragmaHelperFunctionsTrait {
+        fn _get_token_usd_price(self: @ContractState, token_address: ContractAddress) -> u256 {
+            let pair_key = self.token_pairs.read(token_address);
+            assert(pair_key != 0, 'No price feed for token');
+
+            let oracle_dispatcher = IPragmaABIDispatcher {
+                contract_address: self.oracle_address.read()
+            };
+
+            // Get price data from Pragma oracle
+            let output: PragmaPricesResponse = oracle_dispatcher
+                .get_data(DataType::SpotEntry(pair_key), AggregationMode::Median(()));
+
+            // Ensure we have valid data
+            assert(output.num_sources_aggregated > 0, 'No valid price sources');
+
+            // Convert to u256 and adjust for decimals
+            let price_u256: u256 = output.price.into() * DECIMALS_MULTIPLIER;
+            
+            // Calculate divisor without using pow
+            let mut divisor: u256 = 1;
+            let mut i: u32 = 0;
+            loop {
+                if i >= output.decimals {
+                    break;
+                }
+                divisor = divisor * 10;
+                i += 1;
+            };
+            
+            price_u256 / divisor
+        }
+
+
+        fn _verify_price_feed(
+            self: @ContractState,
+            token_address: ContractAddress,
+            pair_key: felt252
+        ) -> bool {
+            let oracle_dispatcher = IPragmaABIDispatcher {
+                contract_address: self.oracle_address.read()
+            };
+
+            // Try to get price data to verify the pair key works
+            let output = oracle_dispatcher.get_data(
+                DataType::SpotEntry(pair_key),
+                AggregationMode::Median(())
+            );
+
+            // Verify we have valid data
+            output.num_sources_aggregated > 0
         }
     }
 
@@ -725,7 +891,7 @@ pub mod Strimz {
             self.supported_tokens.write(token_address, true);
             self.supported_tokens_list.write(count, token_address);
             self.supported_tokens_count.write(count + 1);
-            
+
             self.emit(TokenAdded { token_address });
         }
 
@@ -734,7 +900,3 @@ pub mod Strimz {
         }
     }
 }
-
-
-//contract address- 0x006e1eef173499c6b794e64fcb5e3cae1ad7016c005cbbb207de54ab98f7a9f9
-//class hash- 0x060db5b391035af710f981bcfee9f71f9318fdd9ba558b750ec5fbcfc9bb4686

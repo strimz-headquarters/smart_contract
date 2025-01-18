@@ -5,7 +5,8 @@ edition = "2024_07"
 
 [dependencies]
 starknet = "2.9.2"
-openzeppelin = { git = "https://github.com/OpenZeppelin/cairo-contracts.git", branch = "main" }
+openzeppelin = { git = "https://github.com/OpenZeppelin/cairo-contracts.git" }
+pragma_lib = { git = "https://github.com/astraly-labs/pragma-lib", branch = "main" }
 
 [dev-dependencies]
 snforge_std = "0.35.1"
